@@ -1,0 +1,27 @@
+# Artefactos de compilación (el .deb y el .exe se publican en Releases)
+build_deb/
+*.deb
+build/
+dist/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# Imágenes de disco, ISOs y logs que se generen al probar la app
+*.img
+*.iso
+*.img.sha256
+*.log
+
+# Editores y sistema operativo
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini

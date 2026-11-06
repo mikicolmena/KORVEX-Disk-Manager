@@ -1,2 +1,9 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+# Los scripts conservan el final de línea de su sistema
+*.sh text eol=lf
+*.py text eol=lf
+*.bat text eol=crlf
+# Binarios
+*.png binary
+*.ico binary
