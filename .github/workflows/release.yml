@@ -1,0 +1,111 @@
+name: Release (deb + exe)
+
+# Al subir un tag "vX.Y.Z":
+#   1. Comprueba que el tag coincide con la versión de build_deb.sh.
+#   2. Construye el .deb (Linux) y el .exe (Windows).
+#   3. Crea la release en GitHub con ambos archivos y sus SHA-256.
+# Lanzado a mano (workflow_dispatch) solo construye y deja los artefactos en la ejecución.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          V="$(sed -n 's/^PKG_VERSION="\(.*\)"/\1/p' build_deb.sh)"
+          echo "Versión en build_deb.sh: $V"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME#v}" != "$V" ]; then
+            echo "::error::El tag ${GITHUB_REF_NAME} no coincide con PKG_VERSION=$V en build_deb.sh"
+            exit 1
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+  build-deb:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Comprobar sintaxis
+        run: python3 -m py_compile *.py
+      - name: Construir .deb
+        run: bash build_deb.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb
+          path: korvex-disk-manager_*_all.deb
+
+  build-windows:
+    needs: version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Instalar dependencias
+        run: python -m pip install --upgrade pip -r requirements.txt pyinstaller
+      - name: Compilar .exe
+        run: python -m PyInstaller --noconfirm --clean korvex-disk-manager.spec
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/KORVEX-Disk-Manager.exe
+
+  publish:
+    if: github.ref_type == 'tag'
+    needs: [version, build-deb, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd artifacts
+          sha256sum *.deb *.exe > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Notas de la versión
+        env:
+          V: ${{ needs.version.outputs.version }}
+        run: |
+          cat > notes.md <<NOTES
+          ## KORVEX Disk Manager ${V}
+
+          Gestor de discos para Windows y Linux: particiones, clonado, imágenes, USB arrancables y diagnóstico, con el disco del sistema siempre protegido.
+
+          ### 🐧 Debian / Ubuntu
+          Descarga \`korvex-disk-manager_${V}_all.deb\` e instálalo con:
+          \`\`\`bash
+          sudo apt install ./korvex-disk-manager_${V}_all.deb
+          \`\`\`
+
+          ### 🪟 Windows
+          Descarga \`KORVEX-Disk-Manager.exe\` y ábrelo. Windows pedirá permisos de administrador (UAC), necesarios para acceder a los discos.
+
+          > El ejecutable no está firmado: si SmartScreen avisa, pulsa **Más información → Ejecutar de todas formas**.
+
+          Las sumas SHA-256 de los archivos están en \`SHA256SUMS.txt\`.
+          NOTES
+      - name: Crear release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          V: ${{ needs.version.outputs.version }}
+        run: >
+          gh release create "$GITHUB_REF_NAME"
+          --repo "$GITHUB_REPOSITORY"
+          --title "KORVEX Disk Manager $V"
+          --notes-file notes.md
+          --latest
+          artifacts/*.deb artifacts/*.exe artifacts/SHA256SUMS.txt
