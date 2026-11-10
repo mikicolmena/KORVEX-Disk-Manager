@@ -8,7 +8,7 @@
 Particiones, clonado, imágenes, USB arrancables y diagnóstico de discos,<br>
 con el disco del sistema siempre protegido.
 
-[![Versión](https://img.shields.io/badge/versión-1.0.0-5E6AD2?style=for-the-badge)](../../releases/latest)
+[![Versión](https://img.shields.io/github/v/release/mikicolmena/KORVEX-Disk-Manager?label=versi%C3%B3n&color=5E6AD2&style=for-the-badge)](../../releases/latest)
 [![Linux](https://img.shields.io/badge/Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black)](#-instalación)
 [![Windows](https://img.shields.io/badge/Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white)](#-instalación)
 [![PyQt6](https://img.shields.io/badge/PyQt6-41CD52?style=for-the-badge&logo=qt&logoColor=white)](https://pypi.org/project/PyQt6/)
@@ -77,7 +77,7 @@ con el disco del sistema siempre protegido.
 Descarga el `.deb` desde [**Releases**](../../releases/latest) e instálalo:
 
 ```bash
-sudo apt install ./korvex-disk-manager_1.0.0_all.deb
+sudo apt install ./korvex-disk-manager_*_all.deb
 ```
 
 Aparece en el menú de aplicaciones como **KORVEX Disk Manager** y `apt` instala todas las dependencias.
@@ -127,7 +127,7 @@ python main.py
 **Linux (.deb):**
 ```bash
 ./build_deb.sh
-sudo apt install ./korvex-disk-manager_1.0.0_all.deb
+sudo apt install ./korvex-disk-manager_*_all.deb
 ```
 
 **Windows (.exe):** en una consola dentro de la carpeta del proyecto
@@ -144,6 +144,7 @@ El ejecutable queda en `dist\KORVEX-Disk-Manager.exe`.
 |:--|:--|:--|
 | Python | ≥ 3.10 | |
 | PyQt6 | ≥ 6.4 | Interfaz |
+| cryptography | ≥ 3.4 | Comprobar la firma de las actualizaciones |
 | **Windows:** PowerShell 5.1+ | — | Lectura de discos, formateo (módulo Storage) |
 | **Linux:** `lsblk` | util-linux | Lectura de discos |
 | **Linux:** `pkexec` | polkit | Permisos para formatear y clonar |
@@ -259,7 +260,11 @@ KORVEX-Disk-Manager/
 ├── win_ops.py               # Windows: implementación de cada operación
 ├── korvex_helper.py         # Linux: proceso root lanzado con pkexec
 ├── helper_client.py         # Linux: comunicación con el helper
-├── platform_utils.py        # Rutas, permisos, registro de operaciones, bloqueo de apagado
+├── platform_utils.py        # Rutas, permisos, registro de operaciones, bloqueo de apagado (y APP_VERSION)
+├── updater.py               # Actualizaciones desde GitHub Releases (firma Ed25519 + SHA-256)
+├── tools/release_keys.py    # Generar claves y firmar/verificar releases
+├── RELEASING.md             # Cómo publicar una versión
+├── .github/workflows/       # Release automática al subir un tag vX.Y.Z
 ├── build_deb.sh             # Genera el paquete .deb
 ├── build_windows.bat        # Genera el .exe con PyInstaller
 ├── korvex-disk-manager.spec # Configuración de PyInstaller
@@ -269,6 +274,17 @@ KORVEX-Disk-Manager/
 La configuración se guarda en `~/.config/korvex-disk-manager/config.ini` (Linux) o `%APPDATA%\KORVEX Disk Manager\config.ini` (Windows). En Linux, las operaciones de root se registran en `/var/log/korvex-disk-manager.log`.
 
 ---
+
+## 🔄 Actualizaciones
+
+La app comprueba al abrirse si hay una release nueva en GitHub (se puede desactivar en Ajustes).
+Con un clic la descarga, **verifica su firma y su SHA-256** y se reinicia ya actualizada:
+
+- **Windows (.exe):** sustituye el ejecutable y se vuelve a abrir.
+- **Debian/Ubuntu (.deb):** pide la contraseña e instala el paquete con apt.
+- **Código fuente:** solo avisa; actualiza con `git pull`.
+
+Para publicar versiones, ver [RELEASING.md](RELEASING.md).
 
 ## 🤝 Contribuir
 

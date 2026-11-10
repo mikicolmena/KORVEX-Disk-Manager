@@ -1,9 +1,10 @@
 name: Release (deb + exe)
 
 # Al subir un tag "vX.Y.Z":
-#   1. Comprueba que el tag coincide con la versión de build_deb.sh.
+#   1. Comprueba que el tag coincide con APP_VERSION de platform_utils.py.
 #   2. Construye el .deb (Linux) y el .exe (Windows).
-#   3. Crea la release en GitHub con ambos archivos y sus SHA-256.
+#   3. Firma SHA256SUMS.txt con el secreto UPDATE_SIGNING_KEY (actualizaciones automáticas).
+#   4. Crea la release en GitHub con los archivos, sus SHA-256 y la firma.
 # Lanzado a mano (workflow_dispatch) solo construye y deja los artefactos en la ejecución.
 
 on:
@@ -23,10 +24,14 @@ jobs:
       - uses: actions/checkout@v4
       - id: v
         run: |
-          V="$(sed -n 's/^PKG_VERSION="\(.*\)"/\1/p' build_deb.sh)"
-          echo "Versión en build_deb.sh: $V"
+          V="$(sed -n 's/^APP_VERSION = "\(.*\)"$/\1/p' platform_utils.py)"
+          echo "Versión en platform_utils.py: $V"
+          if ! echo "$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::APP_VERSION='$V' no tiene el formato X.Y.Z"
+            exit 1
+          fi
           if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME#v}" != "$V" ]; then
-            echo "::error::El tag ${GITHUB_REF_NAME} no coincide con PKG_VERSION=$V en build_deb.sh"
+            echo "::error::El tag ${GITHUB_REF_NAME} no coincide con APP_VERSION=$V en platform_utils.py"
             exit 1
           fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
@@ -37,7 +42,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Comprobar sintaxis
-        run: python3 -m py_compile *.py
+        run: python3 -m py_compile *.py tools/*.py
       - name: Construir .deb
         run: bash build_deb.sh
       - uses: actions/upload-artifact@v4
@@ -67,6 +72,10 @@ jobs:
     needs: [version, build-deb, build-windows]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -76,6 +85,18 @@ jobs:
           cd artifacts
           sha256sum *.deb *.exe > SHA256SUMS.txt
           cat SHA256SUMS.txt
+      - name: Firmar (actualizaciones automáticas)
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          if [ -z "$UPDATE_SIGNING_KEY" ]; then
+            echo "::error::Falta el secreto UPDATE_SIGNING_KEY (ver RELEASING.md)"
+            exit 1
+          fi
+          python -m pip install --quiet cryptography
+          python tools/release_keys.py sign artifacts/SHA256SUMS.txt
+          # Comprueba con las claves públicas de updater.py que la app aceptará esta firma
+          python tools/release_keys.py verify artifacts/SHA256SUMS.txt
       - name: Notas de la versión
         env:
           V: ${{ needs.version.outputs.version }}
@@ -96,7 +117,10 @@ jobs:
 
           > El ejecutable no está firmado: si SmartScreen avisa, pulsa **Más información → Ejecutar de todas formas**.
 
-          Las sumas SHA-256 de los archivos están en \`SHA256SUMS.txt\`.
+          ### 🔄 Actualizaciones
+          La aplicación avisa de las versiones nuevas y se actualiza con un clic (Ajustes → Actualizaciones), comprobando antes la firma.
+
+          Las sumas SHA-256 de los archivos están en \`SHA256SUMS.txt\`, firmado en \`SHA256SUMS.txt.sig\` (Ed25519).
           NOTES
       - name: Crear release
         env:
@@ -108,4 +132,4 @@ jobs:
           --title "KORVEX Disk Manager $V"
           --notes-file notes.md
           --latest
-          artifacts/*.deb artifacts/*.exe artifacts/SHA256SUMS.txt
+          artifacts/*.deb artifacts/*.exe artifacts/SHA256SUMS.txt artifacts/SHA256SUMS.txt.sig

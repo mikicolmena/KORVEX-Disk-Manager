@@ -11,7 +11,8 @@ a = Analysis(
         ('KorvexLogo-256.png', '.'),
         ('KorvexLogo-128.png', '.'),
     ],
-    hiddenimports=['win_ops', 'operations', 'rawio', 'diag'],
+    hiddenimports=['win_ops', 'operations', 'rawio', 'diag', 'updater',
+                   'cryptography.hazmat.primitives.asymmetric.ed25519'],
     hookspath=[],
     runtime_hooks=[],
     # El helper de root y su cliente solo se usan en Linux

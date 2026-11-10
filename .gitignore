@@ -25,3 +25,15 @@ env/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Artefactos de release y descargas a medias
+*.exe
+*.exe.new
+*.exe.old
+*.part
+SHA256SUMS.txt
+SHA256SUMS.txt.sig
+
+# Claves privadas (nunca al repo)
+*.pem
+*.key

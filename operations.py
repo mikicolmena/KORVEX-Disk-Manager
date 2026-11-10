@@ -38,6 +38,8 @@ OPS = {
     "smart":         dict(title="Salud SMART",             writes=False, cancelable=True),
     "bench":         dict(title="Test de velocidad",       writes=False, cancelable=True),
     "scan":          dict(title="Escaneo de superficie",   writes=False, cancelable=True),
+    # Instala archivos de la propia app, no toca discos (no deja registro de operación)
+    "update":        dict(title="Actualizar la aplicación", writes=False, cancelable=False),
 }
 
 PHASES = {"copy": "Copiando…", "verify": "Verificando…", "wipe": "Borrando…", "scan": "Leyendo superficie…",

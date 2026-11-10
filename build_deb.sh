@@ -3,14 +3,19 @@
 set -e
 
 PKG_NAME="korvex-disk-manager"
-PKG_VERSION="1.0.0"
+# La versión solo se define en platform_utils.py (APP_VERSION)
+PKG_VERSION="$(sed -n 's/^APP_VERSION = "\(.*\)"$/\1/p' platform_utils.py)"
+if [ -z "${PKG_VERSION}" ]; then
+    echo "❌ No se encontró APP_VERSION en platform_utils.py"
+    exit 1
+fi
 PKG_ARCH="all"
 BUILD_DIR="$(pwd)/build_deb"
 ROOT="${BUILD_DIR}/${PKG_NAME}_${PKG_VERSION}_${PKG_ARCH}"
 LIB_DIR="/usr/lib/${PKG_NAME}"
 POLICY_ID="com.korvex.diskmanager.helper"
 
-MODULES="main.py ui.py style.py disks.py operations.py rawio.py diag.py win_ops.py helper_client.py platform_utils.py korvex_helper.py"
+MODULES="main.py ui.py style.py disks.py operations.py rawio.py diag.py win_ops.py helper_client.py platform_utils.py korvex_helper.py updater.py"
 
 echo "🔨 Construyendo ${PKG_NAME} ${PKG_VERSION}..."
 
@@ -150,6 +155,7 @@ Priority: optional
 Architecture: ${PKG_ARCH}
 Depends: python3 (>= 3.10),
          python3-pyqt6,
+         python3-cryptography,
          util-linux,
          pkexec | policykit-1,
          e2fsprogs

@@ -18,8 +18,8 @@ terminan siempre lo que han empezado, aunque la interfaz se cierre.
 import sys
 sys.dont_write_bytecode = True   # No dejar __pycache__ de root en /usr/lib
 import os
+import re
 import json
-import time
 import shutil
 import signal
 import threading
@@ -668,6 +668,72 @@ def op_scan(p):
     return msg, {"scan": res}
 
 
+# ======================================================================
+# ACTUALIZACIÓN DE LA APLICACIÓN (.deb)
+# ======================================================================
+UPDATE_DIR = "/var/lib/korvex-disk-manager/update"
+
+
+def _copy_hashing(src, dst, limit):
+    """Copia a una carpeta de root (el usuario ya no puede cambiar el archivo
+    entre la comprobación y la instalación) y devuelve su SHA-256."""
+    import hashlib
+    h, n = hashlib.sha256(), 0
+    fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as fi, open(dst, "wb") as fo:
+        for chunk in iter(lambda: fi.read(1024 * 1024), b""):
+            n += len(chunk)
+            if n > limit:
+                raise Fail("Archivo de actualización demasiado grande.")
+            h.update(chunk)
+            fo.write(chunk)
+    os.chmod(dst, 0o644)
+    return h.hexdigest()
+
+
+def op_update(p):
+    import updater as U
+    if U.install_kind() != "deb":
+        raise Fail("Esta instalación no procede del paquete .deb: actualízala manualmente.")
+    asset = os.path.basename(str(p.get("asset", "")))
+    m = re.fullmatch(re.escape(U.DEB_PACKAGE) + r"_(\d+\.\d+\.\d+)_all\.deb", asset)
+    if not m:
+        raise Fail("Nombre de paquete no válido.")
+    need_tool("apt-get", "apt")
+    shutil.rmtree(UPDATE_DIR, ignore_errors=True)
+    os.makedirs(UPDATE_DIR, mode=0o700)    # privada hasta haberlo verificado todo
+    try:
+        deb, sums, sig = (os.path.join(UPDATE_DIR, n) for n in (asset, U.SUMS_NAME, U.SIG_NAME))
+        try:
+            _copy_hashing(p["sums"], sums, 64 * 1024)
+            _copy_hashing(p["sig"], sig, 1024)
+            got = _copy_hashing(p["file"], deb, 1024 ** 3)
+        except OSError as e:
+            raise Fail(f"No se pudo leer la actualización descargada: {e}")
+        try:
+            expected, version = U.verified_sha256(sums, sig, asset)
+        except U.UpdateError as e:
+            raise Fail(str(e))
+        if got != expected:
+            raise Fail("El paquete no coincide con su suma SHA-256 firmada. No se ha instalado nada.")
+        if version != m.group(1) or not U.is_newer(version):
+            raise Fail(f"La versión {version} no es más nueva que la instalada ({U.APP_VERSION}).")
+        pkg = run(["dpkg-deb", "-f", deb, "Package"]).stdout.strip()
+        if pkg != U.DEB_PACKAGE:
+            raise Fail("El archivo no es un paquete de KORVEX Disk Manager.")
+        os.chmod(UPDATE_DIR, 0o755)            # apt (usuario _apt) necesita leer el paquete
+        log(f"Firma y SHA-256 correctos. Instalando la versión {version}…")
+        env = dict(os.environ, LC_ALL="C", DEBIAN_FRONTEND="noninteractive")
+        r = subprocess.run(["apt-get", "install", "-y", "--no-install-recommends", deb],
+                           capture_output=True, text=True, env=env)
+        if r.returncode != 0:
+            raise Fail("apt no ha podido instalar la actualización:\n"
+                       + (r.stderr or r.stdout).strip()[-2000:])
+    finally:
+        shutil.rmtree(UPDATE_DIR, ignore_errors=True)
+    return f"KORVEX Disk Manager {version} instalado.", {"version": version}
+
+
 # name: (función, cancelable)
 OPS = {
     "format": (op_format, False), "label": (op_label, False), "fsck": (op_fsck, False),
@@ -676,6 +742,7 @@ OPS = {
     "clone": (op_clone, True), "erase": (op_erase, True),
     "image_create": (op_image_create, True), "image_restore": (op_image_restore, True),
     "smart": (op_smart, True), "bench": (op_bench, True), "scan": (op_scan, True),
+    "update": (op_update, False),
 }
 
 

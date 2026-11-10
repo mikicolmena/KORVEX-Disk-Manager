@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Interfaz de KORVEX Disk Manager (estilo KORVEX Audio Console)."""
 import os
+import sys
 import shutil
 import logging
 import subprocess
@@ -12,20 +13,21 @@ from PyQt6.QtWidgets import (
     QDialog, QComboBox, QLineEdit, QCheckBox, QDialogButtonBox, QSystemTrayIcon,
     QListWidget, QListWidgetItem, QStackedWidget, QApplication, QMainWindow,
     QSizePolicy, QAbstractItemView, QPlainTextEdit, QGridLayout, QSpinBox, QSlider,
-    QFileDialog,
+    QFileDialog, QTextBrowser,
 )
 from PyQt6.QtCore import Qt, QSettings, QThread, pyqtSignal, QTimer, QRectF
-from PyQt6.QtGui import QCursor, QIcon, QPixmap, QPainter, QColor, QStandardItemModel, QPainterPath
+from PyQt6.QtGui import QCursor, QIcon, QPixmap, QPainter, QColor, QPainterPath
 
 import disks as D
 import rawio as R
 import diag
+import updater as U
 from disks import Disk, Partition, format_bytes
 from operations import (OpWorker, OPS, PHASES, FILESYSTEMS, FS_ARG, FS_TIPS,
                         available_filesystems, clean_label)
 from platform_utils import (IS_WINDOWS, IS_LINUX, APP_NAME, APP_VERSION, open_path, log_dir,
                             is_admin, has_pkexec, PowerGuard, journal_read, journal_clear)
-from style import (TEXT_MAIN, TEXT_MUTED, DANGER, SUCCESS, ACCENT, WARNING, BORDER, PANEL_BG)
+from style import (TEXT_MAIN, TEXT_MUTED, DANGER, SUCCESS, ACCENT, WARNING, BORDER)
 
 HAS_UDISKS = IS_LINUX and shutil.which("udisksctl") is not None
 MiB = D.MiB
@@ -406,6 +408,7 @@ class EraseDialog(BaseDialog):
         super().__init__("Borrado seguro", f"Borrado seguro de {disk.title} · {disk.model or 'Desconocido'}",
                          f"Se sobrescribirá el disco entero ({format_bytes(disk.size)}) para que los datos "
                          f"no se puedan recuperar.", 500, parent)
+        self.disk = disk
         self.cb = QComboBox(); self.cb.setMinimumHeight(36)
         self.cb.addItem("Ceros · 1 pasada (recomendado)", "zero")
         self.cb.addItem("Datos aleatorios · 1 pasada", "random")
@@ -427,7 +430,7 @@ class EraseDialog(BaseDialog):
             "discard": "Pide al SSD que descarte todos sus bloques. Es casi instantáneo; en la "
                        "mayoría de SSD los datos dejan de ser legibles.",
         }[m] + (" En SSD, una pasada de escritura no garantiza borrar las celdas de reserva." if m != "discard"
-                and disk.rotational is False else ""))
+                and self.disk.rotational is False else ""))
 
     def get_data(self):
         return {"method": self.cb.currentData(),
@@ -440,8 +443,9 @@ class ImageCreateDialog(BaseDialog):
                          f"Se guardará una copia exacta del disco entero ({format_bytes(disk.size)}) en un "
                          f"archivo .img. No se modifica el disco.", 520, parent)
         row = QHBoxLayout()
-        self.path = QLineEdit(os.path.join(os.path.expanduser("~"),
-                                           f"{(disk.model or 'disco').replace(' ', '_')}_{disk.short_device}.img"))
+        base = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in (disk.model or "disco"))
+        dev = os.path.basename(disk.device.replace("\\", "/"))
+        self.path = QLineEdit(os.path.join(os.path.expanduser("~"), f"{base}_{dev}.img"))
         b = QPushButton("Examinar…"); b.clicked.connect(self._browse)
         row.addWidget(self.path, 1); row.addWidget(b); self.lay.addLayout(row)
         self.chk_verify = QCheckBox("Verificar al terminar (relee disco e imagen y compara SHA-256)")
@@ -622,7 +626,7 @@ def show_smart(parent, disk: Disk, s: dict):
         for r, a in enumerate(attrs):
             for c, k in enumerate(("id", "name", "value", "worst", "thresh", "raw")):
                 it = QTableWidgetItem("" if a.get(k) is None else str(a.get(k)))
-                if a.get("failing") or (a.get("id") in diag.ATA_CRITICAL and str(a.get("raw", "0")).split()[0] not in ("0", "")):
+                if a.get("failing") or (a.get("id") in diag.ATA_CRITICAL and (str(a.get("raw", "0")).split() or ["0"])[0] != "0"):
                     it.setForeground(QColor(DANGER))
                 t.setItem(r, c, it)
         hh = t.horizontalHeader()
@@ -672,6 +676,115 @@ def show_output(parent, title, msg, output, ok=True):
 
 
 # ======================================================================
+# ACTUALIZACIONES
+# ======================================================================
+class UpdateCheckWorker(QThread):
+    done = pyqtSignal(dict)
+    error = pyqtSignal(str)
+
+    def run(self):
+        try:
+            self.done.emit(U.check_latest())
+        except U.UpdateError as e:
+            self.error.emit(str(e))
+        except Exception as e:
+            logging.exception("Error buscando actualizaciones")
+            self.error.emit(str(e))
+
+
+class UpdateDownloadWorker(QThread):
+    progress = pyqtSignal(object, object)
+    done = pyqtSignal(dict)
+    error = pyqtSignal(str)
+
+    def __init__(self, info):
+        super().__init__()
+        self.info = info
+        self._cancel = False
+
+    def cancel(self):
+        self._cancel = True
+
+    def run(self):
+        try:
+            self.done.emit(U.download(self.info, lambda d, t: self.progress.emit(d, t), lambda: self._cancel))
+        except U.UpdateError as e:
+            self.error.emit(str(e))
+        except Exception as e:
+            logging.exception("Error descargando la actualización")
+            self.error.emit(str(e))
+
+
+class UpdateDialog(QDialog):
+    """Novedades + descarga con progreso. Al terminar deja en `self.result_paths`
+    lo descargado y verificado para que la ventana lo instale."""
+
+    def __init__(self, info: dict, parent=None):
+        super().__init__(parent)
+        self.info, self.worker, self.result_paths = info, None, None
+        self.setWindowTitle("Actualización disponible"); self.setModal(True); self.setMinimumWidth(560)
+        l = QVBoxLayout(self); l.setContentsMargins(24, 24, 24, 24); l.setSpacing(14)
+        h = QLabel(f"<b>KORVEX Disk Manager {info['version']}</b>"); h.setStyleSheet("font-size: 14pt;")
+        l.addWidget(h)
+        s = QLabel(f"Tienes la versión {APP_VERSION}."); s.setObjectName("SubTitle"); l.addWidget(s)
+        notes = QTextBrowser(); notes.setOpenExternalLinks(True); notes.setMinimumHeight(200)
+        notes.setMarkdown(info.get("notes") or "Sin notas de la versión.")
+        l.addWidget(notes, 1)
+        self.bar = QProgressBar(); self.bar.setVisible(False); self.bar.setTextVisible(False); l.addWidget(self.bar)
+        self.lbl = QLabel(); self.lbl.setObjectName("SettingHint"); self.lbl.setWordWrap(True); l.addWidget(self.lbl)
+        row = QHBoxLayout(); row.addStretch()
+        self.btn_later = QPushButton("Más tarde"); self.btn_later.clicked.connect(self.reject)
+        self.btn_go = QPushButton(); self.btn_go.setObjectName("PrimaryBtn"); self.btn_go.setMinimumHeight(36)
+        for b in (self.btn_later, self.btn_go):
+            b.setCursor(Qt.CursorShape.PointingHandCursor); row.addWidget(b)
+        l.addLayout(row)
+        if info["kind"] == "source":
+            self.lbl.setText("Estás ejecutando el código fuente: actualiza con <b>git pull</b> "
+                             "o descarga la versión nueva desde GitHub.")
+            self.btn_go.setText("Abrir GitHub")
+            self.btn_go.clicked.connect(lambda: (open_path(info["url"]), self.reject()))
+        else:
+            self.lbl.setText("Se descargará, se comprobará su firma y la aplicación se reiniciará."
+                             + (" Se pedirá tu contraseña para instalar el paquete." if info["kind"] == "deb" else ""))
+            self.btn_go.setText("Actualizar ahora")
+            self.btn_go.clicked.connect(self._start)
+
+    def _start(self):
+        self.btn_go.setEnabled(False); self.btn_later.setText("Cancelar")
+        self.bar.setVisible(True); self.bar.setRange(0, 0)
+        self.lbl.setText("Descargando…")
+        self.worker = UpdateDownloadWorker(self.info)
+        self.worker.progress.connect(self._on_progress)
+        self.worker.done.connect(self._on_done)
+        self.worker.error.connect(self._on_error)
+        self.worker.start()
+
+    def _on_progress(self, done, total):
+        if total:
+            self.bar.setRange(0, 1000); self.bar.setValue(int(done * 1000 / total))
+            self.lbl.setText(f"Descargando… {format_bytes(done)} de {format_bytes(total)}")
+        else:
+            self.lbl.setText(f"Descargando… {format_bytes(done)}")
+
+    def _on_done(self, paths):
+        self.worker.wait()
+        self.result_paths = paths
+        self.accept()
+
+    def _on_error(self, msg):
+        self.worker.wait()
+        self.bar.setVisible(False)
+        self.lbl.setText(f"<span style='color:{DANGER}'>{msg}</span>")
+        self.btn_go.setEnabled(True); self.btn_go.setText("Reintentar"); self.btn_later.setText("Cerrar")
+
+    def reject(self):
+        # También llega aquí con Esc y con la X: no dejar la descarga corriendo sin diálogo
+        if self.worker and self.worker.isRunning():
+            self.worker.cancel(); self.worker.wait()
+        super().reject()
+
+
+# ======================================================================
 # CIERRE
 # ======================================================================
 class CloseConfirmDialog(QDialog):
@@ -707,7 +820,7 @@ class BusyCloseDialog(QDialog):
         self.setWindowTitle("Operación en curso"); self.setModal(True); self.setFixedWidth(520)
         self.action = "stay"
         l = QVBoxLayout(self); l.setContentsMargins(24, 24, 24, 24); l.setSpacing(14)
-        t = QLabel(f"<b>Hay una operación en curso</b>"); t.setStyleSheet("font-size: 13pt;"); l.addWidget(t)
+        t = QLabel("<b>Hay una operación en curso</b>"); t.setStyleSheet("font-size: 13pt;"); l.addWidget(t)
         s = QLabel(f"{worker.info['title']}: {worker.description}"); s.setObjectName("SubTitle")
         s.setWordWrap(True); l.addWidget(s)
         if worker.cancelable:
@@ -1288,6 +1401,18 @@ class SettingsPage(QWidget):
         for it in items:
             lab = QLabel(it); lab.setObjectName("SettingHint"); lab.setWordWrap(True); c_sec.addWidget(lab)
 
+        cu = self._card(l, "Actualizaciones", f"Versión instalada: {APP_VERSION} · "
+                        + {"exe": "se actualiza sola desde GitHub",
+                           "deb": "paquete .deb (pide contraseña para instalar)",
+                           "source": "código fuente (actualiza con git pull)"}[U.install_kind()])
+        self.chk_updates = QCheckBox("Buscar actualizaciones al abrir la aplicación")
+        self.chk_updates.setChecked(settings.value("check_updates", True, type=bool))
+        self.chk_updates.toggled.connect(lambda v: self.settings.setValue("check_updates", v))
+        cu.addWidget(self.chk_updates)
+        self.btn_check = QPushButton("🔄  Buscar actualizaciones"); self.btn_check.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.lbl_update = QLabel(); self.lbl_update.setObjectName("SettingHint"); self.lbl_update.setWordWrap(True)
+        row = QHBoxLayout(); row.addWidget(self.btn_check); row.addWidget(self.lbl_update, 1); cu.addLayout(row)
+
         c2 = self._card(l, "Registros", f"Cada sesión guarda un log en {log_dir()}"
                         + (" · las operaciones de root, en /var/log/korvex-disk-manager.log" if IS_LINUX else ""))
         b = QPushButton("📂  Abrir carpeta de logs"); b.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1330,6 +1455,8 @@ class DiskManagerWindow(QMainWindow):
         self.op: Optional[OpWorker] = None
         self._op_done_cb = None
         self.cmd_worker: Optional[CommandWorker] = None
+        self.update_worker: Optional[UpdateCheckWorker] = None
+        self.update_info: Optional[dict] = None
         self._quitting = False
         self._quit_after_op = False
         self._kbd_close = False
@@ -1349,6 +1476,8 @@ class DiskManagerWindow(QMainWindow):
             self.hw_timer.timeout.connect(self._poll_linux_hw); self.hw_timer.start()
         self.load_disks()
         QTimer.singleShot(400, self._check_interrupted_op)
+        if self.settings.value("check_updates", True, type=bool):
+            QTimer.singleShot(4000, lambda: self.check_updates(silent=True))
 
     # --------------------------------------------------------------
     def _build_ui(self, icon: QIcon):
@@ -1371,6 +1500,10 @@ class DiskManagerWindow(QMainWindow):
         for label in self.PAGES:
             self.sidebar.addItem(QListWidgetItem(label))
         sl.addWidget(self.sidebar, 1)
+        self.btn_update = QPushButton(); self.btn_update.setObjectName("PrimaryBtn")
+        self.btn_update.setCursor(Qt.CursorShape.PointingHandCursor); self.btn_update.setMinimumHeight(38)
+        self.btn_update.setVisible(False)
+        uw = QHBoxLayout(); uw.setContentsMargins(16, 0, 16, 0); uw.addWidget(self.btn_update); sl.addLayout(uw)
         self.lbl_status = QLabel("Preparado."); self.lbl_status.setObjectName("StatusLbl")
         self.lbl_status.setWordWrap(True); self.lbl_status.setContentsMargins(24, 0, 16, 0)
         sl.addWidget(self.lbl_status)
@@ -1405,6 +1538,8 @@ class DiskManagerWindow(QMainWindow):
         self.clone_page.start_requested.connect(self.start_clone)
         self.tools_page.tool_requested.connect(self.run_tool)
         self.banner.cancel_requested.connect(self.cancel_op)
+        self.btn_update.clicked.connect(self.show_update)
+        self.settings_page.btn_check.clicked.connect(lambda: self.check_updates(silent=False))
 
     def _setup_tray(self, icon):
         self.tray = None
@@ -1561,6 +1696,8 @@ class DiskManagerWindow(QMainWindow):
 
     def _on_op_finished(self, ok, msg, data):
         w = self.op
+        if w is not None:
+            w.wait()    # la señal se emite al final de run(): esto dura milisegundos
         self.power.stop()
         self.banner.finish(ok, msg); self.banner_wrap.setVisible(False)
         self.clone_page.set_busy(False)
@@ -1921,8 +2058,12 @@ class DiskManagerWindow(QMainWindow):
         dlg = ImageCreateDialog(disk, self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        path = os.path.abspath(dlg.path.text().strip())
+        path = dlg.path.text().strip()
         if not path:
+            return
+        path = os.path.abspath(os.path.expanduser(path))
+        if os.path.isdir(path):
+            _msg(self, "error", "Crear imagen", "Indica un nombre de archivo, no una carpeta.")
             return
         reason = D.check_image_source(disk, path, self.disks)
         if reason:
@@ -1989,6 +2130,80 @@ class DiskManagerWindow(QMainWindow):
         self.run_op("erase", dict(self._dparams(disk), **data), disk.describe())
 
     # --------------------------------------------------------------
+    # Actualizaciones
+    # --------------------------------------------------------------
+    def check_updates(self, silent=True):
+        if self.update_worker and self.update_worker.isRunning():
+            return
+        lbl = self.settings_page.lbl_update
+        lbl.setText("Buscando…"); self.settings_page.btn_check.setEnabled(False)
+        self.update_worker = UpdateCheckWorker()
+        self.update_worker.done.connect(lambda info: self._on_update_info(info, silent))
+        self.update_worker.error.connect(lambda err: self._on_update_error(err, silent))
+        self.update_worker.start()
+
+    def _on_update_info(self, info, silent):
+        self.settings_page.btn_check.setEnabled(True)
+        logging.info("Última versión en GitHub: %s (instalada %s)", info.get("version"), APP_VERSION)
+        if not info["newer"]:
+            self.settings_page.lbl_update.setText(f"Tienes la última versión ({APP_VERSION}).")
+            return
+        self.update_info = info
+        self.settings_page.lbl_update.setText(f"Versión {info['version']} disponible.")
+        self.btn_update.setText(f"⬆  Actualizar a {info['version']}"); self.btn_update.setVisible(True)
+        if self.tray and not self.isVisible():
+            self.tray.showMessage(APP_NAME, f"Versión {info['version']} disponible.")
+        if not silent:
+            self.show_update()
+
+    def _on_update_error(self, err, silent):
+        self.settings_page.btn_check.setEnabled(True)
+        logging.warning("Buscar actualizaciones: %s", err)
+        self.settings_page.lbl_update.setText("No se pudo comprobar (¿sin conexión?).")
+        if not silent:
+            _msg(self, "warn", "Actualizaciones", err)
+
+    def show_update(self):
+        info = self.update_info
+        if not info:
+            return
+        if self._op_running():
+            _msg(self, "warn", "Operación en curso", "Espera a que termine la operación actual para actualizar.")
+            return
+        dlg = UpdateDialog(info, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted or not dlg.result_paths:
+            return
+        paths = dlg.result_paths
+        if info["kind"] == "exe":
+            try:
+                exe = U.apply_windows(paths["file"])
+            except OSError as e:
+                _msg(self, "error", "Actualizar", f"No se pudo sustituir el ejecutable: {e}")
+                return
+            self._restart([exe, "--after-update"])
+        elif info["kind"] == "deb":
+            params = {"file": paths["file"], "sums": paths["sums"], "sig": paths["sig"], "asset": info["asset"]}
+
+            def done(ok, msg, data):
+                if not ok:
+                    _msg(self, "error", "Actualizar", msg)
+                    return
+                launcher = shutil.which("korvex-disk-manager")
+                self._restart([launcher, "--after-update"] if launcher else
+                              [sys.executable, os.path.join(U.LINUX_INSTALL_DIR, "main.py"), "--after-update"])
+            self.run_op("update", params, f"versión {info['version']}", done)
+
+    def _restart(self, cmd):
+        logging.info("Reiniciando tras actualizar: %s", cmd)
+        try:
+            subprocess.Popen(cmd, close_fds=True, env=U.restart_env(),
+                             **({} if IS_WINDOWS else {"start_new_session": True}))
+        except OSError as e:
+            _msg(self, "info", "Actualizar", f"Actualización instalada. Vuelve a abrir la aplicación.\n({e})")
+        self._quitting = True
+        QApplication.quit()
+
+    # --------------------------------------------------------------
     # Cierre
     # --------------------------------------------------------------
     def closeEvent(self, event):
@@ -2033,6 +2248,13 @@ class DiskManagerWindow(QMainWindow):
         self._quitting = True
         event.accept()
         QApplication.quit()
+
+    def shutdown(self):
+        """Al salir: liberar el bloqueo de apagado y no destruir hilos en marcha."""
+        self.power.stop()
+        for t in (self.reader, self.cmd_worker, self.op, self.update_worker):
+            if t is not None and t.isRunning():
+                t.wait(5000)
 
     def busy_writing(self) -> bool:
         return self._op_running() and self.op.writes

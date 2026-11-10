@@ -95,7 +95,8 @@ def main():
     os.makedirs(config_dir(), exist_ok=True)
     lock = QLockFile(os.path.join(config_dir(), "instance.lock"))
     lock.setStaleLockTime(0)
-    if not lock.tryLock(200):
+    # Tras actualizar, la instancia anterior tarda un momento en cerrarse y soltar el bloqueo
+    if not lock.tryLock(20000 if "--after-update" in sys.argv else 200):
         QMessageBox.information(None, APP_NAME, f"{APP_NAME} ya está abierto.")
         sys.exit(0)
 
@@ -108,8 +109,16 @@ def main():
         sys.exit(1)
 
     migrate_legacy_config()
+    try:
+        import updater
+        updater.cleanup_after_update()
+    except Exception as e:
+        logging.warning("Limpieza tras actualizar: %s", e)
     window = DiskManagerWindow(config_file(), icon)
-    app.aboutToQuit.connect(window.power.stop)
+    if "--after-update" in sys.argv:
+        # La instancia anterior puede tardar unos segundos en terminar y soltar su .exe
+        QTimer.singleShot(15000, lambda: __import__("updater").cleanup_after_update())
+    app.aboutToQuit.connect(window.shutdown)
 
     if not IS_WINDOWS:
         # SIGTERM (p. ej. al cerrar sesión): no salir mientras se escribe en un disco
