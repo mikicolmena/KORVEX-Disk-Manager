@@ -215,7 +215,7 @@ def confirm_danger(parent, title, heading, body, ok_label, token=None) -> bool:
 class FsDialog(BaseDialog):
     """Elegir sistema de archivos + etiqueta (formatear, convertir, crear partición)."""
 
-    def __init__(self, title, heading, sub, default_label="NuevoVolumen", removable=False,
+    def __init__(self, title, heading, sub, default_label="Volumen", removable=False,
                  exclude_fs=None, size_range=None, show_quick=None, note=None, parent=None):
         super().__init__(title, heading, sub, 460, parent)
         if note:
@@ -307,7 +307,7 @@ class LetterDialog(BaseDialog):
 class ResizeDialog(BaseDialog):
     def __init__(self, disk: Disk, part: Partition, parent=None):
         super().__init__("Redimensionar partición", f"Redimensionar {part.display_name}",
-                         f"{part.fs.upper()} · {format_bytes(part.size)} actuales", 480, parent)
+                         f"{part.fs_display} · {format_bytes(part.size)} actuales", 480, parent)
         self.cur = part.size // MiB
         mx = (part.size + disk.gap_after(part)) // MiB
         used = (part.size - part.free) if part.free is not None else None
@@ -346,7 +346,7 @@ class ResizeDialog(BaseDialog):
 
 class ConvertChoiceDialog(BaseDialog):
     def __init__(self, part: Partition, parent=None):
-        super().__init__("Convertir formato", f"Convertir {part.display_name} ({part.fs.upper()})",
+        super().__init__("Convertir formato", f"Convertir {part.display_name} ({part.fs_display})",
                          "", 480, parent)
         self.choice = None
         b1 = QPushButton("🔄  Convertir a NTFS conservando los datos"); b1.setObjectName("PrimaryBtn")
@@ -389,7 +389,7 @@ class InitDialog(BaseDialog):
             self.cb_fs.setCurrentText(d)
         g.addWidget(self.cb_fs, 2, 1)
         g.addWidget(QLabel("Etiqueta"), 3, 0)
-        self.le = QLineEdit("NuevoVolumen"); g.addWidget(self.le, 3, 1)
+        self.le = QLineEdit("Volumen"); g.addWidget(self.le, 3, 1)
         g.setColumnStretch(1, 1)
         self.lay.addLayout(g)
         self.chk_create.toggled.connect(lambda v: (self.cb_fs.setEnabled(v), self.le.setEnabled(v)))
@@ -938,7 +938,7 @@ class PartBlock(QFrame):
         l.addWidget(strip); l.addSpacing(6)
         name = QLabel(("🔒 " if part.protected else "") + part.display_name)
         name.setObjectName("PartName"); l.addWidget(name)
-        meta = [part.fs.upper() if part.fs else "Sin formato", format_bytes(part.size)]
+        meta = [part.fs_display if part.fs else "Sin formato", format_bytes(part.size)]
         m = QLabel(" · ".join(meta)); m.setObjectName("PartMeta"); l.addWidget(m)
         sub = part.label or part.ptype
         if sub:
@@ -1150,7 +1150,7 @@ class VolumesPage(QWidget):
                 r = self.table.rowCount(); self.table.insertRow(r)
                 self._rows.append((d, p))
                 vals = [("🔒 " if p.protected else "") + p.display_name, p.label, d.title,
-                        (p.fs or "RAW").upper() if IS_LINUX else (p.fs or "RAW"), p.ptype,
+                        p.fs_display if p.fs else "RAW", p.ptype,
                         format_bytes(p.size), format_bytes(p.free) if p.free is not None else "—"]
                 for c, v in enumerate(vals):
                     it = QTableWidgetItem(v)
@@ -1935,7 +1935,7 @@ class DiskManagerWindow(QMainWindow):
         where = part.device if IS_LINUX else f"Partición {part.number}"
         dlg = FsDialog(title, f"{title.split()[0]} {part.display_name}",
                        f"{where} · {format_bytes(part.size)} · {disk.title} ({disk.model or 'Desconocido'})",
-                       part.label or "NuevoVolumen", disk.is_usb, exclude, note=note, parent=self)
+                       part.label or "Volumen", disk.is_usb, exclude, note=note, parent=self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         data = dlg.get_data()
@@ -1968,7 +1968,7 @@ class DiskManagerWindow(QMainWindow):
                             lambda ok, msg, d: show_output(self, "Convertir", msg, d.get("output", ""), ok))
                 return
         self.do_format(disk, part, "Convertir formato", exclude=part.fs_norm,
-                       note=(f"Pasar de {part.fs.upper()} a otro sistema de archivos requiere formatear: "
+                       note=(f"Pasar de {part.fs_display} a otro sistema de archivos requiere formatear: "
                              f"<b>se borrarán los datos</b>. Copia antes lo que quieras conservar."))
 
     def do_resize(self, disk, part):
@@ -1996,7 +1996,7 @@ class DiskManagerWindow(QMainWindow):
     def do_create(self, disk, start, size):
         dlg = FsDialog("Crear partición", f"Nueva partición en {disk.title}",
                        f"{disk.model or 'Desconocido'} · espacio libre de {format_bytes(size)}",
-                       "NuevoVolumen", disk.is_usb, size_range=(16 * MiB, size), show_quick=False, parent=self)
+                       "Volumen", disk.is_usb, size_range=(16 * MiB, size), show_quick=False, parent=self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         data = dlg.get_data()

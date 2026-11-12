@@ -41,6 +41,7 @@ class Partition:
     size: int = 0
     free: Optional[int] = None
     fs: str = ""
+    fs_version: str = ""         # Linux: FAT32 / FAT16 / FAT12 (lsblk FSVER)
     label: str = ""
     ptype: str = ""
     whole_disk: bool = False     # sistema de archivos directamente sobre el disco
@@ -78,6 +79,16 @@ class Partition:
             if m.startswith("/"):
                 return m
         return ""
+
+    @property
+    def fs_display(self) -> str:
+        """Nombre para mostrar. Linux llama «vfat» a toda la familia FAT; la versión
+        real (FAT32, FAT16…) va aparte."""
+        f = (self.fs or "").lower()
+        if f in ("vfat", "fat", "msdos"):
+            return self.fs_version.upper() if self.fs_version else "FAT"
+        return {"exfat": "exFAT", "ntfs": "NTFS", "fat32": "FAT32", "fat16": "FAT16",
+                "crypto_luks": "LUKS", "lvm2_member": "LVM", "swap": "Swap"}.get(f, self.fs.upper())
 
     @property
     def fs_norm(self) -> str:
@@ -324,7 +335,7 @@ def _list_disks_windows() -> List[Disk]:
 # LINUX (lsblk + sysfs)
 # ======================================================================
 LSBLK_COLS = ["NAME", "PATH", "TYPE", "SIZE", "MODEL", "SERIAL", "FSTYPE", "LABEL",
-              "MOUNTPOINTS", "FSAVAIL", "PARTTYPENAME", "PARTN", "RM", "RO", "TRAN", "PTTYPE",
+              "MOUNTPOINTS", "FSAVAIL", "FSVER", "PARTTYPENAME", "PARTN", "RM", "RO", "TRAN", "PTTYPE",
               "ROTA", "LOG-SEC", "DISC-MAX", "UUID", "PARTUUID", "PARTLABEL"]
 # Para versiones antiguas de util-linux que no conocen todas las columnas
 LSBLK_COLS_OLD = ["NAME", "TYPE", "SIZE", "MODEL", "SERIAL", "FSTYPE", "LABEL",
@@ -540,7 +551,7 @@ def _list_disks_linux() -> List[Disk]:
                 mountpoints=mounts, size=_int(ch.get("size")),
                 start=0 if whole else _sysfs_read_int(f"/sys/class/block/{pname}/start") * 512,
                 free=_int(free) if free is not None else None,
-                fs=ch.get("fstype") or "", label=ch.get("label") or "", ptype=ptype, whole_disk=whole,
+                fs=ch.get("fstype") or "", fs_version=ch.get("fsver") or "", label=ch.get("label") or "", ptype=ptype, whole_disk=whole,
                 uuid=ch.get("uuid") or "", partuuid=ch.get("partuuid") or "",
                 partlabel=ch.get("partlabel") or "", fstab=_fstab_refs(ch, fstab),
             )
